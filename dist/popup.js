@@ -19472,6 +19472,19 @@
       loadTabs();
       loadSettings();
       trackRecentTabs();
+      loadRecentTabs();
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (changes.savedTabGroups) {
+          loadTabs();
+        }
+        if (changes.settings) {
+          loadSettings();
+        }
+      });
+      return () => {
+        chrome.storage.onChanged.removeListener(loadTabs);
+        chrome.tabs.onActivated.removeListener(trackRecentTabs);
+      };
     }, []);
     const loadSettings = async () => {
       const stored = await chrome.storage.local.get("settings");
@@ -19497,43 +19510,97 @@
         });
       });
     };
-    const exportTabs = () => {
-      const data = {
-        tabs,
-        groups,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: "application/json"
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "tab-manager-export.json";
-      a.click();
-      URL.revokeObjectURL(url);
-      showNotification("Tabs exported successfully");
+    const loadRecentTabs = async () => {
+      const { recentTabs: savedRecentTabs } = await chrome.storage.local.get(
+        "recentTabs"
+      );
+      if (savedRecentTabs) {
+        setRecentTabs(savedRecentTabs);
+      }
+    };
+    const exportTabs = async () => {
+      try {
+        const response = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: "EXPORT_TABS" }, (response2) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else {
+              resolve(response2);
+            }
+          });
+        });
+        if (!response.success) {
+          throw new Error(response.error || "Export failed");
+        }
+        const blob = new Blob([JSON.stringify(response.data, null, 2)], {
+          type: "application/json"
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `tab-manager-export-${(/* @__PURE__ */ new Date()).toISOString()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showNotification("Tabs exported successfully");
+      } catch (error) {
+        console.error("Error exporting tabs:", error);
+        showNotification("Error exporting tabs", "error");
+      }
     };
     const importTabs = async (event) => {
       try {
         const file = event.target.files[0];
+        if (!file) {
+          showNotification("No file selected", "error");
+          return;
+        }
         const text = await file.text();
-        const data = JSON.parse(text);
-        setGroups(data.groups);
-        await chrome.storage.local.set({ tabGroups: data.groups });
-        showNotification("Tabs imported successfully");
+        const importedData = JSON.parse(text);
+        if (!importedData || !importedData.urls || !importedData.tabGroups) {
+          showNotification("Invalid import file format", "error");
+          return;
+        }
+        const response = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            {
+              type: "IMPORT_TABS",
+              data: importedData
+            },
+            (response2) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(response2);
+              }
+            }
+          );
+        });
+        if (response.success) {
+          showNotification("Tabs imported successfully");
+          await loadTabs();
+        } else {
+          throw new Error(response.error || "Import failed");
+        }
       } catch (error) {
-        showNotification("Error importing tabs", "error");
+        console.error("Error importing tabs:", error);
+        showNotification(`Error importing tabs: ${error.message}`, "error");
+      } finally {
+        event.target.value = "";
       }
     };
     const loadTabs = async () => {
       try {
         setLoading(true);
+        const { savedTabGroups } = await chrome.storage.local.get(
+          "savedTabGroups"
+        );
+        if (savedTabGroups) {
+          setGroups(savedTabGroups);
+        }
         const allTabs = await chrome.tabs.query({});
-        const { tabGroups = {} } = await chrome.storage.local.get("tabGroups");
         setTabs(allTabs);
-        setGroups(tabGroups);
       } catch (error) {
+        console.error("Error loading tabs:", error);
         showNotification("Error loading tabs", "error");
       } finally {
         setLoading(false);
@@ -19552,22 +19619,35 @@
         showNotification("Error switching tab", "error");
       }
     };
-    const TabItem = ({ tab }) => /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex items-center p-2 hover:bg-gray-100 rounded-lg group" }, /* @__PURE__ */ import_react3.default.createElement(
-      "img",
+    const TabItem = ({ tab }) => /* @__PURE__ */ import_react3.default.createElement(
+      "div",
       {
-        src: `chrome://favicon/size/16@2x/${tab.url}`,
-        className: "w-4 h-4 mr-2",
-        alt: ""
-      }
-    ), /* @__PURE__ */ import_react3.default.createElement("span", { className: "flex-1 truncate text-sm" }, tab.title), /* @__PURE__ */ import_react3.default.createElement("div", { className: "opacity-0 group-hover:opacity-100 flex gap-2" }, /* @__PURE__ */ import_react3.default.createElement(
-      "button",
-      {
-        onClick: () => switchToTab(tab.id, tab.windowId),
-        className: "p-1 hover:bg-blue-100 rounded"
+        className: "flex items-center p-2 hover:bg-gray-100 rounded-lg group cursor-pointer",
+        onClick: () => switchToTab(tab.id, tab.windowId)
       },
-      /* @__PURE__ */ import_react3.default.createElement(Bookmark, { className: "w-4 h-4 text-blue-600" })
-    )));
-    const GroupView = () => /* @__PURE__ */ import_react3.default.createElement("div", { className: "space-y-4" }, Object.entries(groups).map(([domain, tabIds]) => /* @__PURE__ */ import_react3.default.createElement("div", { key: domain, className: "border rounded-lg p-2" }, /* @__PURE__ */ import_react3.default.createElement("h3", { className: "font-medium mb-2 flex items-center" }, /* @__PURE__ */ import_react3.default.createElement(Layers, { className: "w-4 h-4 mr-2" }), domain), /* @__PURE__ */ import_react3.default.createElement("div", { className: "space-y-1" }, tabs.filter((tab) => tabIds.includes(tab.id)).map((tab) => /* @__PURE__ */ import_react3.default.createElement(TabItem, { key: tab.id, tab }))))));
+      /* @__PURE__ */ import_react3.default.createElement(
+        "img",
+        {
+          src: `chrome://favicon/size/16@2x/${tab.url}`,
+          className: "w-4 h-4 mr-2",
+          alt: ""
+        }
+      ),
+      /* @__PURE__ */ import_react3.default.createElement("span", { className: "flex-1 truncate text-sm" }, tab.title)
+    );
+    const RecentView = () => /* @__PURE__ */ import_react3.default.createElement("div", { className: `space-y-2 ${settings.darkMode ? "hover:text-black" : ""}` }, recentTabs.length === 0 ? /* @__PURE__ */ import_react3.default.createElement("div", { className: "text-center text-gray-500 py-4" }, "No recent tabs available") : recentTabs.map((tab) => /* @__PURE__ */ import_react3.default.createElement(TabItem, { key: tab.id, tab })));
+    const GroupView = () => /* @__PURE__ */ import_react3.default.createElement("div", { className: "space-y-4" }, Object.entries(groups).map(([domain, tabIds]) => /* @__PURE__ */ import_react3.default.createElement("div", { key: domain, className: "border rounded-lg p-2" }, /* @__PURE__ */ import_react3.default.createElement("h3", { className: "font-medium mb-2 flex items-center" }, /* @__PURE__ */ import_react3.default.createElement(Layers, { className: "w-4 h-4 mr-2" }), domain), /* @__PURE__ */ import_react3.default.createElement(
+      "div",
+      {
+        className: `space-y-1 ${settings.darkMode ? "hover:text-black" : ""}`
+      },
+      tabs.filter((tab) => tabIds.includes(tab.id)).map((tab) => /* @__PURE__ */ import_react3.default.createElement(TabItem, { key: tab.id, tab }))
+    ))));
+    const clearRecentTabs = async () => {
+      await chrome.storage.local.set({ recentTabs: [] });
+      setRecentTabs([]);
+      showNotification("Recent tabs cleared", "info");
+    };
     const SettingsPanel = () => /* @__PURE__ */ import_react3.default.createElement("div", { className: "border rounded-lg p-4 mb-4" }, /* @__PURE__ */ import_react3.default.createElement("h3", { className: "font-medium mb-3 flex items-center" }, /* @__PURE__ */ import_react3.default.createElement(Settings, { className: "w-4 h-4 mr-2" }), "Settings"), /* @__PURE__ */ import_react3.default.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ import_react3.default.createElement("label", { className: "flex items-center" }, /* @__PURE__ */ import_react3.default.createElement(
       "input",
       {
@@ -19597,7 +19677,13 @@
       const filteredTabs = tabs.filter(
         (tab) => tab.title.toLowerCase().includes(searchQuery.toLowerCase()) || tab.url.toLowerCase().includes(searchQuery.toLowerCase())
       );
-      return /* @__PURE__ */ import_react3.default.createElement("div", { className: "space-y-1" }, filteredTabs.map((tab) => /* @__PURE__ */ import_react3.default.createElement(TabItem, { key: tab.id, tab })));
+      return /* @__PURE__ */ import_react3.default.createElement(
+        "div",
+        {
+          className: `space-y-1 ${settings.darkMode ? "hover:text-black" : ""}`
+        },
+        filteredTabs.map((tab) => /* @__PURE__ */ import_react3.default.createElement(TabItem, { key: tab.id, tab }))
+      );
     };
     return /* @__PURE__ */ import_react3.default.createElement(
       "div",
@@ -19610,7 +19696,7 @@
         {
           type: "text",
           placeholder: "Search tabs...",
-          className: "w-full pl-10 pr-4 py-2 border rounded-lg",
+          className: `w-full pl-10 pr-4 py-2 border rounded-lg ${settings.darkMode ? "text-black" : ""}`,
           value: searchQuery,
           onChange: (e) => {
             setSearchQuery(e.target.value);
@@ -19621,23 +19707,39 @@
         "button",
         {
           onClick: exportTabs,
-          className: "flex items-center px-3 py-1 rounded hover:bg-gray-100"
+          className: `flex items-center px-3 py-1 rounded hover:bg-gray-100 ${settings.darkMode ? "hover:text-black" : ""}`
         },
         /* @__PURE__ */ import_react3.default.createElement(Download, { className: "w-4 h-4 mr-1" }),
         "Export"
-      ), /* @__PURE__ */ import_react3.default.createElement("label", { className: "flex items-center px-3 py-1 rounded hover:bg-gray-100 cursor-pointer" }, /* @__PURE__ */ import_react3.default.createElement(Share2, { className: "w-4 h-4 mr-1" }), "Import", /* @__PURE__ */ import_react3.default.createElement(
-        "input",
+      ), /* @__PURE__ */ import_react3.default.createElement(
+        "label",
         {
-          type: "file",
-          accept: ".json",
-          onChange: importTabs,
-          className: "hidden"
-        }
-      ))), /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex gap-2" }, /* @__PURE__ */ import_react3.default.createElement(
+          className: `flex items-center px-3 py-1 rounded hover:bg-gray-100 cursor-pointer ${settings.darkMode ? "hover:text-black" : ""}`
+        },
+        /* @__PURE__ */ import_react3.default.createElement(Share2, { className: "w-4 h-4 mr-1" }),
+        "Import",
+        /* @__PURE__ */ import_react3.default.createElement(
+          "input",
+          {
+            type: "file",
+            accept: ".json",
+            onChange: importTabs,
+            className: "hidden",
+            disabled: loading
+          }
+        )
+      ), loading && /* @__PURE__ */ import_react3.default.createElement("div", { className: "animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600" }), /* @__PURE__ */ import_react3.default.createElement(
+        "button",
+        {
+          onClick: clearRecentTabs,
+          className: `flex items-center px-3 py-1 rounded hover:bg-gray-100 ${settings.darkMode ? "hover:text-black" : ""}`
+        },
+        "Clear Recent Tabs"
+      )), /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex gap-2" }, /* @__PURE__ */ import_react3.default.createElement(
         "button",
         {
           onClick: () => setActiveView("groups"),
-          className: `flex items-center px-3 py-1 rounded ${activeView === "groups" ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"}`
+          className: `flex items-center px-3 py-1 rounded ${activeView === "groups" ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"} ${settings.darkMode ? "hover:text-black" : ""} `
         },
         /* @__PURE__ */ import_react3.default.createElement(Layers, { className: "w-4 h-4 mr-1" }),
         "Groups"
@@ -19645,12 +19747,12 @@
         "button",
         {
           onClick: () => setActiveView("recent"),
-          className: `flex items-center px-3 py-1 rounded ${activeView === "recent" ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"}`
+          className: `flex items-center px-3 py-1 rounded ${activeView === "recent" ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"} ${settings.darkMode ? "hover:text-black" : ""}`
         },
         /* @__PURE__ */ import_react3.default.createElement(Clock, { className: "w-4 h-4 mr-1" }),
         "Recent"
       ))),
-      /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex-1 overflow-y-auto" }, loading ? /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex items-center justify-center h-full" }, /* @__PURE__ */ import_react3.default.createElement("div", { className: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" })) : /* @__PURE__ */ import_react3.default.createElement(import_react3.default.Fragment, null, activeView === "groups" && /* @__PURE__ */ import_react3.default.createElement(GroupView, null), activeView === "search" && /* @__PURE__ */ import_react3.default.createElement(SearchView, null), activeView === "recent" && /* @__PURE__ */ import_react3.default.createElement("div", { className: "text-center text-gray-500 py-8" }, "Recent tabs feature coming soon!"))),
+      /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex-1 overflow-y-auto" }, loading ? /* @__PURE__ */ import_react3.default.createElement("div", { className: "flex items-center justify-center h-full" }, /* @__PURE__ */ import_react3.default.createElement("div", { className: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" })) : /* @__PURE__ */ import_react3.default.createElement(import_react3.default.Fragment, null, activeView === "groups" && /* @__PURE__ */ import_react3.default.createElement(GroupView, null), activeView === "search" && /* @__PURE__ */ import_react3.default.createElement(SearchView, null), activeView === "recent" && /* @__PURE__ */ import_react3.default.createElement(RecentView, null), " ")),
       notification && /* @__PURE__ */ import_react3.default.createElement(
         "div",
         {

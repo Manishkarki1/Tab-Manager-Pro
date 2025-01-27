@@ -4,6 +4,8 @@
   "version": "1.0",
   "description": "Advanced tab management with grouping, suspension, and sync features",
   "permissions": ["tabs", "storage", "idle", "unlimitedStorage"],
+  "host_permissions": ["*://*/*"],
+
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

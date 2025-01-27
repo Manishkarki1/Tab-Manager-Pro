@@ -5,7 +5,7 @@ let suspensionTimeouts = new Map();
 // Configuration
 const IDLE_TIMEOUT = 30; // minutes
 const MAX_SUSPENDED_TABS = 20;
-const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const SYNC_INTERVAL = 2 * 60 * 1000;
 
 // Tab grouping functionality
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -13,13 +13,111 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     analyzeAndGroupTab(tab);
   }
 });
-
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.runtime.onStartup.addListener(async () => {
+  await loadSavedState();
+});
+chrome.tabs.onRemoved.addListener(async (tabId) => {
   removeTabFromGroups(tabId);
   inactiveTabs.delete(tabId);
   suspensionTimeouts.delete(tabId);
+  await saveState();
 });
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "EXPORT_TABS") {
+    handleExportTabs()
+      .then((data) => sendResponse({ success: true, data }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
 
+  if (message.type === "IMPORT_TABS") {
+    handleImportTabs(message.data)
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+});
+async function handleExportTabs() {
+  try {
+    // Get all current tabs
+    const allTabs = await chrome.tabs.query({});
+    const exportData = {
+      tabGroups: {},
+      urls: {},
+      timestamp: Date.now(),
+    };
+
+    // Organize tabs by domain
+    for (const tab of allTabs) {
+      try {
+        const url = new URL(tab.url);
+        const domain = url.hostname;
+
+        if (!exportData.tabGroups[domain]) {
+          exportData.tabGroups[domain] = [];
+          exportData.urls[domain] = [];
+        }
+
+        exportData.tabGroups[domain].push(tab.id);
+        exportData.urls[domain].push(tab.url);
+      } catch (error) {
+        console.error("Error processing tab:", tab, error);
+      }
+    }
+
+    return exportData;
+  } catch (error) {
+    console.error("Error in handleExportTabs:", error);
+    throw error;
+  }
+}
+async function handleImportTabs(importedData) {
+  try {
+    // Validate imported data
+    if (
+      !importedData ||
+      typeof importedData !== "object" ||
+      !importedData.urls ||
+      typeof importedData.urls !== "object"
+    ) {
+      throw new Error("Invalid import data format");
+    }
+
+    // Ensure `tabGroups` is initialized
+    if (typeof tabGroups === "undefined" || tabGroups === null) {
+      tabGroups = {}; // Initialize if undefined
+    }
+
+    // Process each domain and URL
+    for (const [domain, urls] of Object.entries(importedData.urls)) {
+      if (!Array.isArray(urls)) continue;
+
+      // Initialize the domain group if it doesn't exist
+      if (!tabGroups[domain]) {
+        tabGroups[domain] = [];
+      }
+
+      // Create new tabs for each URL
+      for (const url of urls) {
+        try {
+          const newTab = await chrome.tabs.create({
+            url,
+            active: false,
+          });
+          tabGroups[domain].push(newTab.id); // Add tab ID to the group
+        } catch (tabError) {
+          console.error(`Failed to create tab for ${url}:`, tabError);
+        }
+      }
+    }
+
+    await saveState(); // Save the updated state
+    return true;
+  } catch (error) {
+    console.error("Error in handleImportTabs:", error);
+    throw error;
+  }
+}
 async function analyzeAndGroupTab(tab) {
   try {
     const url = new URL(tab.url);
@@ -42,7 +140,55 @@ async function analyzeAndGroupTab(tab) {
     console.error("Error in analyzeAndGroupTab:", error);
   }
 }
+async function loadSavedState() {
+  try {
+    const { savedTabGroups, savedInactiveTabs } =
+      await chrome.storage.local.get(["savedTabGroups", "savedInactiveTabs"]);
 
+    if (savedTabGroups) {
+      tabGroups = savedTabGroups;
+    }
+
+    if (savedInactiveTabs) {
+      inactiveTabs = new Set(savedInactiveTabs);
+    }
+
+    // Verify and clean up tabGroups
+    await validateTabGroups();
+  } catch (error) {
+    console.error("Error loading saved state:", error);
+  }
+}
+async function validateTabGroups() {
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const validTabIds = new Set(allTabs.map((tab) => tab.id));
+
+    for (const domain in tabGroups) {
+      tabGroups[domain] = tabGroups[domain].filter((tabId) =>
+        validTabIds.has(tabId)
+      );
+      if (tabGroups[domain].length === 0) {
+        delete tabGroups[domain];
+      }
+    }
+
+    await saveState();
+  } catch (error) {
+    console.error("Error validating tab groups:", error);
+  }
+}
+async function saveState() {
+  try {
+    await chrome.storage.local.set({
+      savedTabGroups: tabGroups,
+      savedInactiveTabs: Array.from(inactiveTabs),
+      lastSaved: Date.now(),
+    });
+  } catch (error) {
+    console.error("Error saving state:", error);
+  }
+}
 async function removeTabFromGroups(tabId) {
   for (const domain in tabGroups) {
     tabGroups[domain] = tabGroups[domain].filter((id) => id !== tabId);
@@ -185,8 +331,8 @@ async function setupSync() {
 
 async function startSync() {
   try {
-    await syncToCloud();
-    setInterval(syncToCloud, SYNC_INTERVAL);
+    await syncToCloud(); // Initial sync
+    setInterval(syncToCloud, SYNC_INTERVAL); // Schedule periodic sync
   } catch (error) {
     console.error("Error starting sync:", error);
   }
@@ -197,15 +343,38 @@ async function syncToCloud() {
     const { settings } = await chrome.storage.local.get("settings");
     if (!settings?.syncEnabled) return;
 
-    const syncData = {
+    const currentSyncData = await chrome.storage.sync.get(null);
+    const newSyncData = {
       tabGroups,
+      urls: await getUrlsForGroups(),
       lastSyncTime: Date.now(),
     };
 
-    await chrome.storage.sync.set(syncData);
+    // Only sync if there are changes
+    if (
+      JSON.stringify(currentSyncData.tabGroups) !== JSON.stringify(tabGroups) ||
+      JSON.stringify(currentSyncData.urls) !== JSON.stringify(newSyncData.urls)
+    ) {
+      await chrome.storage.sync.set(newSyncData);
+      console.log("Sync successful:", newSyncData);
+    } else {
+      console.log("No changes to sync.");
+    }
   } catch (error) {
     console.error("Error syncing to cloud:", error);
   }
+}
+async function getUrlsForGroups() {
+  const urls = {};
+  const allTabs = await chrome.tabs.query({});
+
+  for (const domain in tabGroups) {
+    urls[domain] = tabGroups[domain]
+      .map((tabId) => allTabs.find((tab) => tab.id === tabId)?.url)
+      .filter((url) => url);
+  }
+
+  return urls;
 }
 
 // Helper functions
@@ -218,24 +387,37 @@ async function saveTabGroups() {
 }
 
 // Listen for sync changes
-chrome.storage.onChanged.addListener((changes, areaName) => {
+chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === "sync" && changes.tabGroups) {
-    handleSyncedChanges(changes.tabGroups.newValue);
+    await handleSyncedChanges(
+      changes.tabGroups.newValue,
+      changes.urls?.newValue || {}
+    );
   }
 });
 
-async function handleSyncedChanges(newTabGroups) {
+async function handleSyncedChanges(newTabGroups, newUrls) {
   try {
-    // Merge with local groups
-    for (const domain in newTabGroups) {
-      if (!tabGroups[domain]) {
-        tabGroups[domain] = [];
+    const { settings } = await chrome.storage.local.get("settings");
+    if (!settings?.syncEnabled) return;
+
+    // Create new tabs for URLs that don't exist locally
+    for (const domain in newUrls) {
+      const existingTabs = await chrome.tabs.query({});
+      const existingUrls = new Set(existingTabs.map((tab) => tab.url));
+
+      for (const url of newUrls[domain]) {
+        if (!existingUrls.has(url)) {
+          const newTab = await chrome.tabs.create({ url, active: false });
+          if (!tabGroups[domain]) {
+            tabGroups[domain] = [];
+          }
+          tabGroups[domain].push(newTab.id);
+        }
       }
-      tabGroups[domain] = [
-        ...new Set([...tabGroups[domain], ...newTabGroups[domain]]),
-      ];
     }
-    await saveTabGroups();
+
+    await saveState();
   } catch (error) {
     console.error("Error handling synced changes:", error);
   }

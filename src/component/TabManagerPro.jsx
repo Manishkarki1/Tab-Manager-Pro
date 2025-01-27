@@ -33,6 +33,21 @@ const TabManagerPro = () => {
     loadTabs();
     loadSettings();
     trackRecentTabs();
+    loadRecentTabs();
+    // Listen for storage changes
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (changes.savedTabGroups) {
+        loadTabs(); // Reload tabs when storage changes
+      }
+      if (changes.settings) {
+        loadSettings(); // Reload settings when they change
+      }
+    });
+
+    return () => {
+      chrome.storage.onChanged.removeListener(loadTabs);
+      chrome.tabs.onActivated.removeListener(trackRecentTabs);
+    };
   }, []);
   const loadSettings = async () => {
     const stored = await chrome.storage.local.get("settings");
@@ -58,44 +73,112 @@ const TabManagerPro = () => {
       });
     });
   };
-
-  const exportTabs = () => {
-    const data = {
-      tabs,
-      groups,
-      timestamp: new Date().toISOString(),
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "tab-manager-export.json";
-    a.click();
-    URL.revokeObjectURL(url);
-    showNotification("Tabs exported successfully");
+  const loadRecentTabs = async () => {
+    const { recentTabs: savedRecentTabs } = await chrome.storage.local.get(
+      "recentTabs"
+    );
+    if (savedRecentTabs) {
+      setRecentTabs(savedRecentTabs);
+    }
   };
+  const exportTabs = async () => {
+    try {
+      const response = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ type: "EXPORT_TABS" }, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(response);
+          }
+        });
+      });
+
+      if (!response.success) {
+        throw new Error(response.error || "Export failed");
+      }
+
+      // Create and download the export file
+      const blob = new Blob([JSON.stringify(response.data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `tab-manager-export-${new Date().toISOString()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      showNotification("Tabs exported successfully");
+    } catch (error) {
+      console.error("Error exporting tabs:", error);
+      showNotification("Error exporting tabs", "error");
+    }
+  };
+
   const importTabs = async (event) => {
     try {
       const file = event.target.files[0];
+      if (!file) {
+        showNotification("No file selected", "error");
+        return;
+      }
+
       const text = await file.text();
-      const data = JSON.parse(text);
-      setGroups(data.groups);
-      await chrome.storage.local.set({ tabGroups: data.groups });
-      showNotification("Tabs imported successfully");
+      const importedData = JSON.parse(text);
+
+      // Validate the imported data
+      if (!importedData || !importedData.urls || !importedData.tabGroups) {
+        showNotification("Invalid import file format", "error");
+        return;
+      }
+
+      // Send to background script for processing
+      const response = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(
+          {
+            type: "IMPORT_TABS",
+            data: importedData,
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else {
+              resolve(response);
+            }
+          }
+        );
+      });
+
+      if (response.success) {
+        showNotification("Tabs imported successfully");
+        await loadTabs(); // Reload the tab list
+      } else {
+        throw new Error(response.error || "Import failed");
+      }
     } catch (error) {
-      showNotification("Error importing tabs", "error");
+      console.error("Error importing tabs:", error);
+      showNotification(`Error importing tabs: ${error.message}`, "error");
+    } finally {
+      // Reset the file input
+      event.target.value = "";
     }
   };
+
   const loadTabs = async () => {
     try {
       setLoading(true);
+      const { savedTabGroups } = await chrome.storage.local.get(
+        "savedTabGroups"
+      );
+      if (savedTabGroups) {
+        setGroups(savedTabGroups);
+      }
+
+      // Get current tabs
       const allTabs = await chrome.tabs.query({});
-      const { tabGroups = {} } = await chrome.storage.local.get("tabGroups");
       setTabs(allTabs);
-      setGroups(tabGroups);
     } catch (error) {
+      console.error("Error loading tabs:", error);
       showNotification("Error loading tabs", "error");
     } finally {
       setLoading(false);
@@ -118,24 +201,34 @@ const TabManagerPro = () => {
   };
 
   const TabItem = ({ tab }) => (
-    <div className="flex items-center p-2 hover:bg-gray-100 rounded-lg group">
+    <div
+      className="flex items-center p-2 hover:bg-gray-100 rounded-lg group cursor-pointer"
+      onClick={() => switchToTab(tab.id, tab.windowId)}
+    >
       <img
         src={`chrome://favicon/size/16@2x/${tab.url}`}
         className="w-4 h-4 mr-2"
         alt=""
       />
       <span className="flex-1 truncate text-sm">{tab.title}</span>
-      <div className="opacity-0 group-hover:opacity-100 flex gap-2">
-        <button
-          onClick={() => switchToTab(tab.id, tab.windowId)}
-          className="p-1 hover:bg-blue-100 rounded"
-        >
+      {/* <div className="opacity-0 group-hover:opacity-100 flex gap-2">
+        <button className="p-1 hover:bg-blue-100 rounded">
           <Bookmark className="w-4 h-4 text-blue-600" />
         </button>
-      </div>
+      </div> */}
     </div>
   );
-
+  const RecentView = () => (
+    <div className={`space-y-2 ${settings.darkMode ? "hover:text-black" : ""}`}>
+      {recentTabs.length === 0 ? (
+        <div className="text-center text-gray-500 py-4">
+          No recent tabs available
+        </div>
+      ) : (
+        recentTabs.map((tab) => <TabItem key={tab.id} tab={tab} />)
+      )}
+    </div>
+  );
   const GroupView = () => (
     <div className="space-y-4">
       {Object.entries(groups).map(([domain, tabIds]) => (
@@ -144,7 +237,11 @@ const TabManagerPro = () => {
             <Layers className="w-4 h-4 mr-2" />
             {domain}
           </h3>
-          <div className="space-y-1">
+          <div
+            className={`space-y-1 ${
+              settings.darkMode ? "hover:text-black" : ""
+            }`}
+          >
             {tabs
               .filter((tab) => tabIds.includes(tab.id))
               .map((tab) => (
@@ -155,6 +252,11 @@ const TabManagerPro = () => {
       ))}
     </div>
   );
+  const clearRecentTabs = async () => {
+    await chrome.storage.local.set({ recentTabs: [] });
+    setRecentTabs([]);
+    showNotification("Recent tabs cleared", "info");
+  };
   const SettingsPanel = () => (
     <div className="border rounded-lg p-4 mb-4">
       <h3 className="font-medium mb-3 flex items-center">
@@ -207,7 +309,9 @@ const TabManagerPro = () => {
     );
 
     return (
-      <div className="space-y-1">
+      <div
+        className={`space-y-1 ${settings.darkMode ? "hover:text-black" : ""}`}
+      >
         {filteredTabs.map((tab) => (
           <TabItem key={tab.id} tab={tab} />
         ))}
@@ -229,7 +333,9 @@ const TabManagerPro = () => {
           <input
             type="text"
             placeholder="Search tabs..."
-            className="w-full pl-10 pr-4 py-2 border rounded-lg"
+            className={`w-full pl-10 pr-4 py-2 border rounded-lg ${
+              settings.darkMode ? "text-black" : ""
+            }`}
             value={searchQuery}
             onChange={(e) => {
               setSearchQuery(e.target.value);
@@ -240,12 +346,18 @@ const TabManagerPro = () => {
         <div className="flex gap-2 mb-4">
           <button
             onClick={exportTabs}
-            className="flex items-center px-3 py-1 rounded hover:bg-gray-100"
+            className={`flex items-center px-3 py-1 rounded hover:bg-gray-100 ${
+              settings.darkMode ? "hover:text-black" : ""
+            }`}
           >
             <Download className="w-4 h-4 mr-1" />
             Export
           </button>
-          <label className="flex items-center px-3 py-1 rounded hover:bg-gray-100 cursor-pointer">
+          <label
+            className={`flex items-center px-3 py-1 rounded hover:bg-gray-100 cursor-pointer ${
+              settings.darkMode ? "hover:text-black" : ""
+            }`}
+          >
             <Share2 className="w-4 h-4 mr-1" />
             Import
             <input
@@ -253,8 +365,20 @@ const TabManagerPro = () => {
               accept=".json"
               onChange={importTabs}
               className="hidden"
+              disabled={loading}
             />
           </label>
+          {loading && (
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600" />
+          )}
+          <button
+            onClick={clearRecentTabs}
+            className={`flex items-center px-3 py-1 rounded hover:bg-gray-100 ${
+              settings.darkMode ? "hover:text-black" : ""
+            }`}
+          >
+            Clear Recent Tabs
+          </button>
         </div>
         {/* Action buttons */}
         <div className="flex gap-2">
@@ -264,7 +388,7 @@ const TabManagerPro = () => {
               activeView === "groups"
                 ? "bg-blue-100 text-blue-600"
                 : "hover:bg-gray-100"
-            }`}
+            } ${settings.darkMode ? "hover:text-black" : ""} `}
           >
             <Layers className="w-4 h-4 mr-1" />
             Groups
@@ -275,7 +399,7 @@ const TabManagerPro = () => {
               activeView === "recent"
                 ? "bg-blue-100 text-blue-600"
                 : "hover:bg-gray-100"
-            }`}
+            } ${settings.darkMode ? "hover:text-black" : ""}`}
           >
             <Clock className="w-4 h-4 mr-1" />
             Recent
@@ -293,15 +417,11 @@ const TabManagerPro = () => {
           <>
             {activeView === "groups" && <GroupView />}
             {activeView === "search" && <SearchView />}
-            {activeView === "recent" && (
-              <div className="text-center text-gray-500 py-8">
-                Recent tabs feature coming soon!
-              </div>
-            )}
+            {activeView === "recent" && <RecentView />}{" "}
+            {/* Use the RecentView */}
           </>
         )}
       </div>
-
       {/* Notification */}
       {notification && (
         <div
