@@ -2,44 +2,13 @@
 <html>
   <head>
     <title>Tab Manager Pro</title>
-    <style>
-      body {
-        width: 400px;
-        padding: 16px;
-        font-family: Arial, sans-serif;
-      }
-      .search-box {
-        width: 100%;
-        padding: 8px;
-        margin-bottom: 16px;
-      }
-      .tab-group {
-        margin-bottom: 16px;
-      }
-      .tab-list {
-        max-height: 300px;
-        overflow-y: auto;
-      }
-      .tab-item {
-        display: flex;
-        align-items: center;
-        padding: 8px;
-        border-bottom: 1px solid #eee;
-      }
-      .actions {
-        margin-top: 16px;
-        display: flex;
-        gap: 8px;
-      }
-    </style>
+    <script src="dist/popup.js" defer></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css"
+      rel="stylesheet"
+    />
   </head>
   <body>
-    <input type="text" class="search-box" placeholder="Search tabs..." />
-    <div id="tab-groups"></div>
-    <div class="actions">
-      <button id="save-session">Save Session</button>
-      <button id="restore-session">Restore Session</button>
-    </div>
-    <script src="popup.js"></script>
+    <div id="root"></div>
   </body>
 </html>

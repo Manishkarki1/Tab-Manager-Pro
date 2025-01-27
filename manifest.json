@@ -3,7 +3,7 @@
   "name": "Tab Manager Pro",
   "version": "1.0",
   "description": "Advanced tab management with grouping, suspension, and sync features",
-  "permissions": ["tabs", "storage", "idle", "identity"],
+  "permissions": ["tabs", "storage", "idle", "unlimitedStorage"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

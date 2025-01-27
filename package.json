@@ -1,0 +1,21 @@
+{
+  "name": "tab-manager-pro",
+  "version": "1.0.0",
+  "main": "background.js",
+  "scripts": {
+    "build": "esbuild src/popup.jsx --bundle --outfile=dist/popup.js",
+    "watch": "esbuild src/popup.jsx --bundle --outfile=dist/popup.js --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Chrome tab manager extension",
+  "dependencies": {
+    "lucide-react": "^0.474.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}
